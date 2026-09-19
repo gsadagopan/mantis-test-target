@@ -117,7 +117,7 @@ write('mantis-test-recipe.yml', 'type: specs.openrewrite.org/v1beta/recipe\nname
 before_pom = (work / 'pom.xml').read_text()
 baseline = scan(resolved('before-tree', before_version), 'before', True)
 mvn('before-tests', 'verify', f'-DexpectedFramework={before_version}')
-rewrite_args = ('org.openrewrite.maven:rewrite-maven-plugin:6.48.0:run',
+rewrite_args = ('org.openrewrite.maven:rewrite-maven-plugin:6.46.1:run',
                 '-Drewrite.configLocation=mantis-test-recipe.yml', '-Drewrite.activeRecipes=regression.Fix')
 mvn('rewrite', *rewrite_args)
 after_pom = (work / 'pom.xml').read_text()
