@@ -1,5 +1,6 @@
 """Historical recipe regression fixtures; not the Mantis service end-to-end test."""
 import difflib
+import hashlib
 import json
 import pathlib
 import shutil
@@ -11,6 +12,7 @@ import xml.etree.ElementTree as ET
 SCENARIOS = {
     'jackson': ('com.fasterxml.jackson.core:jackson-databind', 'CVE-2020-36518', '2.9.8', '2.13.5'),
     'boot-managed': ('org.springframework:spring-webflux', 'CVE-2024-38816', '6.1.12', '6.1.13'),
+    'boot-major': ('org.springframework:spring-webmvc', 'CVE-2024-38816', '5.3.31', '6.1.21'),
 }
 name = sys.argv[1]
 package, cve, before_version, after_version = SCENARIOS[name]
@@ -58,7 +60,66 @@ def resolved(label, expected):
     return matches[0]
 
 parent = ''
-if name == 'boot-managed':
+release = '21'
+if name == 'boot-major':
+    release = '11'
+    parent = '<parent><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-parent</artifactId><version>2.7.18</version><relativePath/></parent>'
+    dependencies = ''.join('<dependency><groupId>org.springframework.boot</groupId><artifactId>' + artifact + '</artifactId>' + scope + '</dependency>' for artifact, scope in [('spring-boot-starter-web',''),('spring-boot-starter-validation',''),('spring-boot-starter-test','<scope>test</scope>')])
+    recipe = '''  - org.openrewrite.maven.UpgradeParentVersion:
+      groupId: org.springframework.boot
+      artifactId: spring-boot-starter-parent
+      newVersion: 3.3.13
+  - org.openrewrite.maven.ChangePropertyValue:
+      key: maven.compiler.release
+      newValue: '17'
+  - org.openrewrite.java.ChangePackage:
+      oldPackageName: javax.servlet
+      newPackageName: jakarta.servlet
+      recursive: true
+  - org.openrewrite.java.ChangePackage:
+      oldPackageName: javax.validation
+      newPackageName: jakarta.validation
+      recursive: true
+'''
+    write('src/main/java/regression/App.java', '''package regression;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.web.bind.annotation.*;
+import javax.servlet.http.HttpServletRequest;
+import javax.validation.Valid;
+import javax.validation.constraints.NotBlank;
+@SpringBootApplication
+@RestController
+public class App {
+ public static void main(String[] args) { SpringApplication.run(App.class, args); }
+ @GetMapping("/hello") public String hello(HttpServletRequest request) { return "mantis:" + request.getMethod(); }
+ @PostMapping("/echo") public String echo(@Valid @RequestBody Message input) { return input.name; }
+ public static class Message { @NotBlank public String name; }
+}
+''')
+    test = '''package regression;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.web.client.TestRestTemplate;
+import org.springframework.http.*;
+import static org.junit.jupiter.api.Assertions.*;
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+class SmokeTest {
+ @Autowired TestRestTemplate http;
+ @Test void servletHttpBehavior() { assertEquals("mantis:GET", http.getForObject("/hello", String.class)); }
+ @Test void beanValidationRejectsEmptyInput() {
+  var headers = new HttpHeaders(); headers.setContentType(MediaType.APPLICATION_JSON);
+  assertEquals(400, http.postForEntity("/echo", new HttpEntity<>("{\\"name\\":\\"\\"}", headers), String.class).getStatusCodeValue());
+ }
+ @Test void validInputAccepted() {
+  var headers = new HttpHeaders(); headers.setContentType(MediaType.APPLICATION_JSON);
+  var response = http.postForEntity("/echo", new HttpEntity<>("{\\"name\\":\\"mantis\\"}", headers), String.class);
+  assertEquals(200, response.getStatusCodeValue()); assertEquals("mantis", response.getBody());
+ }
+ @Test void frameworkAlignment() { assertEquals(System.getProperty("expectedFramework"), org.springframework.core.SpringVersion.getVersion()); }
+}'''
+elif name == 'boot-managed':
     parent = '<parent><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-parent</artifactId><version>3.3.3</version><relativePath/></parent>'
     dependencies = '<dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-webflux</artifactId></dependency>'
     recipe = '''  - org.openrewrite.maven.UpgradeParentVersion:
@@ -106,7 +167,7 @@ class SmokeTest {
 write('pom.xml', f'''<project xmlns="http://maven.apache.org/POM/4.0.0">
 <modelVersion>4.0.0</modelVersion>{parent}
 <groupId>regression</groupId><artifactId>{name}</artifactId><version>1.0</version>
-<properties><maven.compiler.release>21</maven.compiler.release><project.build.sourceEncoding>UTF-8</project.build.sourceEncoding></properties>
+<properties><maven.compiler.release>{release}</maven.compiler.release><project.build.sourceEncoding>UTF-8</project.build.sourceEncoding></properties>
 <dependencies>{dependencies}<dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId><version>5.11.0</version><scope>test</scope></dependency></dependencies>
 <build><plugins><plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-compiler-plugin</artifactId><version>3.13.0</version></plugin><plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-surefire-plugin</artifactId><version>3.5.2</version></plugin></plugins></build>
 </project>''')
@@ -115,6 +176,9 @@ write('rewrite.yml', '# Existing repository-owned config must remain intact.\n')
 original_config = (work / 'rewrite.yml').read_bytes()
 write('mantis-test-recipe.yml', 'type: specs.openrewrite.org/v1beta/recipe\nname: regression.Fix\ndisplayName: Historical vulnerability fix\ndescription: Isolated regression fixture.\nrecipeList:\n' + recipe)
 before_pom = (work / 'pom.xml').read_text()
+source_paths = ['pom.xml', 'rewrite.yml'] + [str(p.relative_to(work)).replace('\\', '/') for p in (work / 'src').rglob('*.java')]
+before_files = {path: (work / path).read_text() for path in source_paths}
+(out / f'{name}-before-files.json').write_text(json.dumps(before_files, indent=2))
 baseline = scan(resolved('before-tree', before_version), 'before', True)
 mvn('before-tests', 'verify', f'-DexpectedFramework={before_version}')
 rewrite_args = ('org.openrewrite.maven:rewrite-maven-plugin:6.46.1:run',
@@ -128,10 +192,18 @@ if name == 'boot-managed':
     assert root.find('m:parent/m:version', ns).text == '3.3.4'
     assert root.find('m:properties/m:spring-framework.version', ns) is None
     assert root.find('m:dependencyManagement', ns) is None
+if name == 'boot-major':
+    root = ET.fromstring(after_pom)
+    assert root.find('m:parent/m:version', ns).text == '3.3.13'
+    assert root.find('m:properties/m:maven.compiler.release', ns).text == '17'
+    source = (work / 'src/main/java/regression/App.java').read_text()
+    assert 'javax.servlet' not in source and 'javax.validation' not in source
+    assert 'jakarta.servlet' in source and 'jakarta.validation' in source
 mvn('after-tests', 'clean', 'verify', f'-DexpectedFramework={after_version}')
 fixed = scan(resolved('after-tree', after_version), 'after', False)
+after_files = {path: (work / path).read_text() for path in source_paths}
 mvn('idempotence', *rewrite_args)
-assert (work / 'pom.xml').read_text() == after_pom, 'Second rewrite changed POM'
+assert {path: (work / path).read_text() for path in source_paths} == after_files, 'Second rewrite changed source files'
 assert (work / 'rewrite.yml').read_bytes() == original_config, 'Repository configuration changed'
 reports = list((work / 'target/surefire-reports').glob('TEST-*.xml'))
 assert reports, 'No tests executed'
@@ -142,5 +214,6 @@ for report in reports:
     count += int(result.get('tests', '0'))
 assert count > 0
 (out / f'{name}-remediation.patch').write_text(''.join(difflib.unified_diff(before_pom.splitlines(True), after_pom.splitlines(True), fromfile='before/pom.xml', tofile='after/pom.xml')))
+(out / f'{name}-after-files.json').write_text(json.dumps(after_files, indent=2))
 (out / f'{name}-result.json').write_text(json.dumps({'scenario': name, 'target_cve': cve, 'before': baseline, 'after': fixed, 'tests': count, 'idempotent': True, 'scope': 'recipe regression, not Mantis service E2E'}, indent=2))
 print(f'PASS: {name}; {count} tests; targeted advisory removed; rewrite idempotent')
