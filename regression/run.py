@@ -2,6 +2,7 @@
 import difflib
 import hashlib
 import json
+import os
 import pathlib
 import shutil
 import subprocess
@@ -173,6 +174,13 @@ write('pom.xml', f'''<project xmlns="http://maven.apache.org/POM/4.0.0">
 </project>''')
 write('src/test/java/regression/SmokeTest.java', test)
 write('rewrite.yml', '# Existing repository-owned config must remain intact.\n')
+if os.environ.get('MANTIS_USE_CHECKOUT') == 'true':
+    # Orchestrated mode operates on the requested repository commit, not a generated fixture.
+    checkout = pathlib.Path(__file__).resolve().parent.parent
+    shutil.rmtree(work / 'src')  # Only the disposable source directory generated above.
+    shutil.copytree(checkout / 'src', work / 'src')
+    shutil.copyfile(checkout / 'pom.xml', work / 'pom.xml')
+    shutil.copyfile(checkout / 'rewrite.yml', work / 'rewrite.yml')
 original_config = (work / 'rewrite.yml').read_bytes()
 write('mantis-test-recipe.yml', 'type: specs.openrewrite.org/v1beta/recipe\nname: regression.Fix\ndisplayName: Historical vulnerability fix\ndescription: Isolated regression fixture.\nrecipeList:\n' + recipe)
 before_pom = (work / 'pom.xml').read_text()
@@ -215,5 +223,5 @@ for report in reports:
 assert count > 0
 (out / f'{name}-remediation.patch').write_text(''.join(difflib.unified_diff(before_pom.splitlines(True), after_pom.splitlines(True), fromfile='before/pom.xml', tofile='after/pom.xml')))
 (out / f'{name}-after-files.json').write_text(json.dumps(after_files, indent=2))
-(out / f'{name}-result.json').write_text(json.dumps({'scenario': name, 'target_cve': cve, 'before': baseline, 'after': fixed, 'tests': count, 'idempotent': True, 'scope': 'recipe regression, not Mantis service E2E'}, indent=2))
+(out / f'{name}-result.json').write_text(json.dumps({'scenario': name, 'target_cve': cve, 'before': baseline, 'after': fixed, 'tests': count, 'idempotent': True, 'base_sha': os.environ.get('MANTIS_BASE_SHA', ''), 'worker_sha': os.environ.get('GITHUB_SHA', ''), 'scope': 'repository remediation worker' if os.environ.get('MANTIS_USE_CHECKOUT') == 'true' else 'recipe regression, not Mantis service E2E'}, indent=2))
 print(f'PASS: {name}; {count} tests; targeted advisory removed; rewrite idempotent')
