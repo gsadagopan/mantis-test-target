@@ -1,0 +1,35 @@
+name: Remediation regression fixtures
+on:
+  push:
+    branches: ['mantis-validation/**']
+permissions:
+  contents: read
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [jackson]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Scan, rewrite, test, rescan, and rerun for idempotence
+        run: python3 regression/run.py '${{ matrix.scenario }}'
+        env:
+          MAVEN_OPTS: -Xmx2g
+          MANTIS_USE_CHECKOUT: 'true'
+          MANTIS_BASE_SHA: 'a199ad098939eb62bf1bece54203621bb8056c37'
+      - name: Save evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: regression-${{ matrix.scenario }}
+          path: regression-output/
+          retention-days: 7
