@@ -1,0 +1,1 @@
+Disposable historical Mantis remediation fixture. Do not deploy. Base for validated staging PRs only.
